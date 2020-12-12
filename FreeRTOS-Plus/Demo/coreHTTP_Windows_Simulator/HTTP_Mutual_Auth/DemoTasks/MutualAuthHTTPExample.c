@@ -102,7 +102,7 @@
 
 /* Check that a transport timeout for transport send and receive is defined. */
 #ifndef democonfigTRANSPORT_SEND_RECV_TIMEOUT_MS
-    #define democonfigTRANSPORT_SEND_RECV_TIMEOUT_MS    ( 1000 )
+    #define democonfigTRANSPORT_SEND_RECV_TIMEOUT_MS    ( 200U )
 #endif
 
 /* Check that a size for the user buffer is defined. */

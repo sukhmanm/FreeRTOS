@@ -92,7 +92,7 @@
 
 /* Check that a transport timeout for transport send and receive is defined. */
 #ifndef democonfigTRANSPORT_SEND_RECV_TIMEOUT_MS
-    #define democonfigTRANSPORT_SEND_RECV_TIMEOUT_MS    ( 5000 )
+    #define democonfigTRANSPORT_SEND_RECV_TIMEOUT_MS    ( 200U )
 #endif
 
 /* Check that a size for the user buffer is defined. */
@@ -166,8 +166,8 @@
  */
 #define DELAY_BETWEEN_DEMO_RETRY_ITERATIONS_TICKS    ( pdMS_TO_TICKS( 5000U ) )
 
-/** 
- * @brief Each compilation unit that consumes the NetworkContext must define it. 
+/**
+ * @brief Each compilation unit that consumes the NetworkContext must define it.
  * It should contain a single pointer to the type of your desired transport.
  * When using multiple transports in the same compilation unit, define this pointer as void *.
  *
