@@ -574,6 +574,15 @@ static void prvHTTPDemoTask( void * pvParameters )
             xResponseQueue = xQueueCreate( democonfigQUEUE_SIZE,
                                            sizeof( ResponseItem_t ) );
 
+            if( ( xRequestQueue == NULL ) || ( xResponseQueue == NULL ) )
+            {
+                LogError( ( "Error creating queues." ) );
+            }
+            else
+            {
+                LogInfo( ( "Queues created." ) );
+            }
+
             /* Open request and response tasks. */
             xDemoStatus = xTaskCreate( prvRequestTask,
                                        "RequestTask",
@@ -596,6 +605,10 @@ static void prvHTTPDemoTask( void * pvParameters )
         {
             /* Enter main HTTP task download loop. */
             xDemoStatus = prvDownloadLoop();
+        }
+        else
+        {
+            LogError( ( "Error in task creation." ) );
         }
 
         /************************** Disconnect. *****************************/
