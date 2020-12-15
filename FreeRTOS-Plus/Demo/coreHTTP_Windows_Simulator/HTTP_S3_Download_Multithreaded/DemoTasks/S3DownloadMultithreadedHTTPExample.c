@@ -603,6 +603,8 @@ static void prvHTTPDemoTask( void * pvParameters )
 
         if( xDemoStatus == pdPASS )
         {
+            LogInfo( ( "Tasks created." ) );
+
             /* Enter main HTTP task download loop. */
             xDemoStatus = prvDownloadLoop();
         }
