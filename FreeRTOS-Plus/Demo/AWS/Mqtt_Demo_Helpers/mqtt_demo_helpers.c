@@ -1,5 +1,5 @@
 /*
- * FreeRTOS V202011.00
+ * FreeRTOS V202012.00
  * Copyright (C) 2020 Amazon.com, Inc. or its affiliates.  All Rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
@@ -51,7 +51,7 @@
 #include "core_mqtt.h"
 
 /* Exponential backoff retry include. */
-#include "exponential_backoff.h"
+#include "backoff_algorithm.h"
 
 /* Transport interface implementation include header for TLS. */
 #include "using_mbedtls.h"
@@ -83,6 +83,23 @@
 #endif
 
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief The maximum number of retries for network operation with server.
+ */
+#define RETRY_MAX_ATTEMPTS                           ( 5U )
+
+/**
+ * @brief The maximum back-off delay (in milliseconds) for retrying failed operation
+ *  with server.
+ */
+#define RETRY_MAX_BACKOFF_DELAY_MS                   ( 5000U )
+
+/**
+ * @brief The base back-off delay (in milliseconds) to use for network operation retry
+ * attempts.
+ */
+#define RETRY_BACKOFF_BASE_MS                        ( 500U )
 
 /**
  * @brief Timeout for receiving CONNACK packet in milliseconds.
@@ -185,6 +202,20 @@ typedef struct PublishPackets
 
 /*-----------------------------------------------------------*/
 
+/** 
+ * @brief Each compilation unit that consumes the NetworkContext must define it. 
+ * It should contain a single pointer to the type of your desired transport.
+ * When using multiple transports in the same compilation unit, define this pointer as void *.
+ *
+ * @note Transport stacks are defined in FreeRTOS-Plus/Source/Application-Protocols/network_transport.
+ */
+struct NetworkContext
+{
+    TlsTransportParams_t * pParams;
+};
+
+/*-----------------------------------------------------------*/
+
 /**
  * @brief Global entry time into the application to use as a reference timestamp
  * in the #prvGetTimeMs function. #prvGetTimeMs will always return the difference
@@ -219,6 +250,22 @@ static uint16_t globalUnsubscribePacketIdentifier = 0U;
 static PublishPackets_t outgoingPublishPackets[ MAX_OUTGOING_PUBLISHES ] = { 0 };
 
 /*-----------------------------------------------------------*/
+
+/**
+ * @brief A wrapper to the "uxRand()" random number generator so that it
+ * can be passed to the backoffAlgorithm library for retry logic.
+ *
+ * This function implements the #BackoffAlgorithm_RNG_T type interface
+ * in the backoffAlgorithm library API.
+ *
+ * @note The "uxRand" function represents a pseudo random number generator.
+ * However, it is recommended to use a True Randon Number Generator (TRNG)
+ * for generating unique device-specific random values to avoid possibility
+ * of network collisions from multiple devices retrying network operations.
+ *
+ * @return The generated randon number. This function ALWAYS succeeds.
+ */
+static int32_t prvGenerateRandomNumber();
 
 /**
  * @brief Connect to MQTT broker with reconnection retries.
@@ -285,12 +332,20 @@ static uint32_t prvGetTimeMs( void );
 
 /*-----------------------------------------------------------*/
 
+static int32_t prvGenerateRandomNumber()
+{
+    return( uxRand() & INT32_MAX );
+}
+
+/*-----------------------------------------------------------*/
+
 static TlsTransportStatus_t prvConnectToServerWithBackoffRetries( NetworkContext_t * pxNetworkContext )
 {
     TlsTransportStatus_t xNetworkStatus = TLS_TRANSPORT_SUCCESS;
-    RetryUtilsStatus_t xRetryUtilsStatus = RetryUtilsSuccess;
-    RetryUtilsParams_t xReconnectParams = { 0 };
+    BackoffAlgorithmStatus_t xBackoffAlgStatus = BackoffAlgorithmSuccess;
+    BackoffAlgorithmContext_t xReconnectParams = { 0 };
     NetworkCredentials_t xNetworkCredentials = { 0 };
+    uint16_t usNextRetryBackOff = 0U;
 
     /* ALPN protocols must be a NULL-terminated list of strings. Therefore,
      * the first entry will contain the actual ALPN protocol string while the
@@ -318,9 +373,11 @@ static TlsTransportStatus_t prvConnectToServerWithBackoffRetries( NetworkContext
     #endif
     xNetworkCredentials.pAlpnProtos = pcAlpnProtocols;
 
-    /* Initialize reconnect attempts and interval. */
-    RetryUtils_ParamsReset( &xReconnectParams );
-    xReconnectParams.maxRetryAttempts = MAX_RETRY_ATTEMPTS;
+    /* Initialize reconnect attempts and interval.*/
+    BackoffAlgorithm_InitializeParams( &xReconnectParams,
+                                       RETRY_BACKOFF_BASE_MS,
+                                       RETRY_MAX_BACKOFF_DELAY_MS,
+                                       RETRY_MAX_ATTEMPTS );
 
     /* Attempt to connect to MQTT broker. If connection fails, retry after
      * a timeout. Timeout value will exponentially increase until maximum
@@ -343,16 +400,25 @@ static TlsTransportStatus_t prvConnectToServerWithBackoffRetries( NetworkContext
 
         if( xNetworkStatus != TLS_TRANSPORT_SUCCESS )
         {
-            LogWarn( ( "Connection to the broker failed. Retrying connection with backoff and jitter." ) );
-            xRetryUtilsStatus = RetryUtils_BackoffAndSleep( &xReconnectParams );
-        }
+            /* Generate a random number and calculate backoff value (in milliseconds) for
+             * the next connection retry.
+             * Note: It is recommended to seed the random number generator with a device-specific
+             * entropy source so that possibility of multiple devices retrying failed network operations
+             * at similar intervals can be avoided. */
+            xBackoffAlgStatus = BackoffAlgorithm_GetNextBackoff( &xReconnectParams, uxRand(), &usNextRetryBackOff );
 
-        if( xRetryUtilsStatus == RetryUtilsRetriesExhausted )
-        {
-            LogError( ( "Connection to the broker failed, all attempts exhausted." ) );
-            xNetworkStatus = TLS_TRANSPORT_CONNECT_FAILURE;
+            if( xBackoffAlgStatus == BackoffAlgorithmRetriesExhausted )
+            {
+                LogError( ( "Connection to the broker failed, all attempts exhausted." ) );
+            }
+            else if( xBackoffAlgStatus == BackoffAlgorithmSuccess )
+            {
+                LogWarn( ( "Connection to the broker failed. "
+                           "Retrying connection with backoff and jitter." ) );
+                vTaskDelay( pdMS_TO_TICKS( usNextRetryBackOff ) );
+            }
         }
-    } while( ( xNetworkStatus != TLS_TRANSPORT_SUCCESS ) && ( xRetryUtilsStatus == RetryUtilsSuccess ) );
+    } while( ( xNetworkStatus != TLS_TRANSPORT_SUCCESS ) && ( xBackoffAlgStatus == BackoffAlgorithmSuccess ) );
 
     return xNetworkStatus;
 }
@@ -498,9 +564,9 @@ static BaseType_t xHandlePublishResend( MQTTContext_t * pxMqttContext )
             if( xMQTTStatus != MQTTSuccess )
             {
                 LogError( ( "Sending duplicate PUBLISH for packet id %u "
-                            " failed with status %u.",
+                            " failed with status %s.",
                             outgoingPublishPackets[ ucIndex ].packetId,
-                            xMQTTStatus ) );
+                            MQTT_Status_strerror( xMQTTStatus ) ) );
                 xReturnStatus = pdFAIL;
                 break;
             }
@@ -531,9 +597,8 @@ BaseType_t xEstablishMqttSession( MQTTContext_t * pxMqttContext,
     configASSERT( pxMqttContext != NULL );
     configASSERT( pxNetworkContext != NULL );
 
-    /* Initialize the mqtt context and network context. */
+    /* Initialize the mqtt context. */
     ( void ) memset( pxMqttContext, 0U, sizeof( MQTTContext_t ) );
-    ( void ) memset( pxNetworkContext, 0U, sizeof( NetworkContext_t ) );
 
     if( prvConnectToServerWithBackoffRetries( pxNetworkContext ) != TLS_TRANSPORT_SUCCESS )
     {
@@ -561,7 +626,8 @@ BaseType_t xEstablishMqttSession( MQTTContext_t * pxMqttContext,
         if( xMQTTStatus != MQTTSuccess )
         {
             xReturnStatus = pdFAIL;
-            LogError( ( "MQTT init failed with status %u.", xMQTTStatus ) );
+            LogError( ( "MQTT init failed with status %s.",
+                        MQTT_Status_strerror( xMQTTStatus ) ) );
         }
         else
         {
@@ -614,7 +680,8 @@ BaseType_t xEstablishMqttSession( MQTTContext_t * pxMqttContext,
             if( xMQTTStatus != MQTTSuccess )
             {
                 xReturnStatus = pdFAIL;
-                LogError( ( "Connection with MQTT broker failed with status %u.", xMQTTStatus ) );
+                LogError( ( "Connection with MQTT broker failed with status %s.",
+                            MQTT_Status_strerror( xMQTTStatus ) ) );
             }
             else
             {
@@ -676,8 +743,8 @@ BaseType_t xDisconnectMqttSession( MQTTContext_t * pxMqttContext,
 
         if( xMQTTStatus != MQTTSuccess )
         {
-            LogError( ( "Sending MQTT DISCONNECT failed with status=%u.",
-                        xMQTTStatus ) );
+            LogError( ( "Sending MQTT DISCONNECT failed with status=%s.",
+                        MQTT_Status_strerror( xMQTTStatus ) ) );
             xReturnStatus = pdFAIL;
         }
     }
@@ -721,8 +788,8 @@ BaseType_t xSubscribeToTopic( MQTTContext_t * pxMqttContext,
 
     if( xMQTTStatus != MQTTSuccess )
     {
-        LogError( ( "Failed to send SUBSCRIBE packet to broker with error = %u.",
-                    xMQTTStatus ) );
+        LogError( ( "Failed to send SUBSCRIBE packet to broker with error = %s.",
+                    MQTT_Status_strerror( xMQTTStatus ) ) );
         xReturnStatus = pdFAIL;
     }
     else
@@ -743,8 +810,8 @@ BaseType_t xSubscribeToTopic( MQTTContext_t * pxMqttContext,
         if( xMQTTStatus != MQTTSuccess )
         {
             xReturnStatus = pdFAIL;
-            LogError( ( "MQTT_ProcessLoop returned with status = %u.",
-                        xMQTTStatus ) );
+            LogError( ( "MQTT_ProcessLoop returned with status = %s.",
+                        MQTT_Status_strerror( xMQTTStatus ) ) );
         }
     }
 
@@ -784,8 +851,8 @@ BaseType_t xUnsubscribeFromTopic( MQTTContext_t * pxMqttContext,
 
     if( xMQTTStatus != MQTTSuccess )
     {
-        LogError( ( "Failed to send UNSUBSCRIBE packet to broker with error = %u.",
-                    xMQTTStatus ) );
+        LogError( ( "Failed to send UNSUBSCRIBE packet to broker with error = %s.",
+                    MQTT_Status_strerror( xMQTTStatus ) ) );
         xReturnStatus = pdFAIL;
     }
     else
@@ -800,8 +867,8 @@ BaseType_t xUnsubscribeFromTopic( MQTTContext_t * pxMqttContext,
         if( xMQTTStatus != MQTTSuccess )
         {
             xReturnStatus = pdFAIL;
-            LogError( ( "MQTT_ProcessLoop returned with status = %u.",
-                        xMQTTStatus ) );
+            LogError( ( "MQTT_ProcessLoop returned with status = %s.",
+                        MQTT_Status_strerror( xMQTTStatus ) ) );
         }
     }
 
@@ -854,8 +921,8 @@ BaseType_t xPublishToTopic( MQTTContext_t * pxMqttContext,
 
         if( xMQTTStatus != MQTTSuccess )
         {
-            LogError( ( "Failed to send PUBLISH packet to broker with error = %u.",
-                        xMQTTStatus ) );
+            LogError( ( "Failed to send PUBLISH packet to broker with error = %s.",
+                        MQTT_Status_strerror( xMQTTStatus ) ) );
             vCleanupOutgoingPublishAt( ucPublishIndex );
             xReturnStatus = pdFAIL;
         }
@@ -876,8 +943,8 @@ BaseType_t xPublishToTopic( MQTTContext_t * pxMqttContext,
 
             if( xMQTTStatus != MQTTSuccess )
             {
-                LogWarn( ( "MQTT_ProcessLoop returned with status = %u.",
-                           xMQTTStatus ) );
+                LogError( ( "MQTT_ProcessLoop returned with status = %s.",
+                            MQTT_Status_strerror( xMQTTStatus ) ) );
                 xReturnStatus = pdFAIL;
             }
         }
@@ -888,17 +955,18 @@ BaseType_t xPublishToTopic( MQTTContext_t * pxMqttContext,
 
 /*-----------------------------------------------------------*/
 
-BaseType_t xProcessLoop( MQTTContext_t * pxMqttContext )
+BaseType_t xProcessLoop( MQTTContext_t * pxMqttContext,
+                         uint32_t ulTimeoutMs )
 {
     BaseType_t xReturnStatus = pdFAIL;
     MQTTStatus_t xMQTTStatus = MQTTSuccess;
 
-    xMQTTStatus = MQTT_ProcessLoop( pxMqttContext, mqttexamplePROCESS_LOOP_TIMEOUT_MS );
+    xMQTTStatus = MQTT_ProcessLoop( pxMqttContext, ulTimeoutMs );
 
     if( xMQTTStatus != MQTTSuccess )
     {
-        LogWarn( ( "MQTT_ProcessLoop returned with status = %u.",
-                   xMQTTStatus ) );
+        LogError( ( "MQTT_ProcessLoop returned with status = %s.",
+                    MQTT_Status_strerror( xMQTTStatus ) ) );
     }
     else
     {

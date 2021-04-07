@@ -1,5 +1,5 @@
 /*
- * FreeRTOS V202011.00
+ * FreeRTOS V202012.00
  * Copyright (C) 2020 Amazon.com, Inc. or its affiliates.  All Rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy of
@@ -133,6 +133,7 @@ extern void vLoggingPrintf( const char * pcFormatString,
  * "...base64 data...\n"\
  * "-----END CERTIFICATE-----\n"
  *
+ * #define democonfigROOT_CA_PEM    "...insert here..."
  */
 
 /**
@@ -200,27 +201,28 @@ extern void vLoggingPrintf( const char * pcFormatString,
  * The current value is given as an example. Please update for your specific
  * operating system.
  */
-#define democonfigOS_NAME                                "FreeRTOS"
+#define democonfigOS_NAME                   "FreeRTOS"
 
 /**
  * @brief The version of the operating system that the application is running
  * on. The current value is given as an example. Please update for your specific
  * operating system version.
  */
-#define democonfigOS_VERSION                             tskKERNEL_VERSION_NUMBER
+#define democonfigOS_VERSION                tskKERNEL_VERSION_NUMBER
 
 /**
  * @brief The name of the hardware platform the application is running on. The
  * current value is given as an example. Please update for your specific
  * hardware platform.
  */
-#define democonfigHARDWARE_PLATFORM_NAME                 "WinSim"
+#define democonfigHARDWARE_PLATFORM_NAME    "WinSim"
 
 /**
  * @brief The name of the MQTT library used and its version, following an "@"
  * symbol.
  */
-#define democonfigMQTT_LIB                               "core-mqtt@1.0.1"
+#include "core_mqtt.h" /* Include coreMQTT header for MQTT_LIBRARY_VERSION macro. */
+#define democonfigMQTT_LIB                               "core-mqtt@"MQTT_LIBRARY_VERSION
 
 /**
  * @brief Set the stack size of the main demo task.
@@ -258,6 +260,13 @@ extern void vLoggingPrintf( const char * pcFormatString,
  * defender report.
  */
 #define democonfigESTABLISHED_CONNECTIONS_ARRAY_SIZE     10
+
+/**
+ * @brief Size of the task numbers array.
+ *
+ * This must be at least the number of tasks used.
+ */
+#define democonfigCUSTOM_METRICS_TASKS_ARRAY_SIZE        10
 
 /**
  * @brief Size of the buffer which contains the generated device defender report.
